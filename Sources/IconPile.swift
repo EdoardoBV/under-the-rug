@@ -20,7 +20,7 @@ enum IconPile {
     private static func run(_ src: String) -> NSAppleEventDescriptor? {
         var err: NSDictionary?
         let r = NSAppleScript(source: src)?.executeAndReturnError(&err)
-        if let err { rugLog("pile script error \(err)") }
+        if let err { rugLog("pile script error \(err[NSAppleScript.errorNumber] ?? "?")") }
         return err == nil ? r : nil
     }
 

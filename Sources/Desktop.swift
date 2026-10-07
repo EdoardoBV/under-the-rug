@@ -1,6 +1,14 @@
 import AppKit
 import ApplicationServices
 
+// Подробный лог (имена файлов, дерево Accessibility, замеры) только при отладке:
+// RUG_DEBUG=1 или defaults write com.srtnk.rug rug.debug -bool true
+let rugDebugOn = ProcessInfo.processInfo.environment["RUG_DEBUG"] != nil || UserDefaults.standard.bool(forKey: "rug.debug")
+
+func rugDebug(_ s: @autoclosure () -> String) {
+    if rugDebugOn { rugLog(s()) }
+}
+
 func rugLog(_ s: String) {
     let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Rug.log")
     let line = "\(Date()) \(s)\n"
@@ -82,7 +90,7 @@ final class DesktopScanner {
         }
         if !loggedTree {
             loggedTree = true
-            rugLog("AX tree: " + tree.prefix(40).joined(separator: " | "))
+            rugDebug("AX tree: " + tree.prefix(40).joined(separator: " | "))
         }
         return out
     }
@@ -104,7 +112,7 @@ final class DesktopScanner {
     private func scanAppleScript(iconSize: CGFloat) -> [DesktopIcon]? {
         var err: NSDictionary?
         guard let script, let res = script.executeAndReturnError(&err) as NSAppleEventDescriptor?, err == nil else {
-            rugLog("AppleScript error: \(String(describing: err))")
+            rugLog("AppleScript error \(err?[NSAppleScript.errorNumber] ?? "?")")
             return nil
         }
         guard res.numberOfItems == 2, let ps = res.atIndex(1), let ns = res.atIndex(2) else { return nil }

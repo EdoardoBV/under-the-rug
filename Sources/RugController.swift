@@ -180,7 +180,7 @@ final class RugController: NSObject, MTKViewDelegate {
         stepTime += CACurrentMediaTime() - t0
         frames += 1
         if frames == 120 {
-            rugLog(String(format: "sim %.2f ms/frame, maxSpeed %.1f", stepTime / 120 * 1000, cloth.maxSpeed))
+            rugDebug(String(format: "sim %.2f ms/frame, maxSpeed %.1f", stepTime / 120 * 1000, cloth.maxSpeed))
             frames = 0
             stepTime = 0
         }
@@ -280,7 +280,7 @@ final class RugController: NSObject, MTKViewDelegate {
             return Bump(center: SIMD2(Float(ic.rect.midX), h - cy), radius: SIMD2(r, r), height: height)
         }
         if bumps != lastBumps {
-            rugLog("icons via \(scanner.source): " + icons.prefix(30).map { "\($0.name)@\(Int($0.rect.minX)),\(Int($0.rect.minY)) \(Int($0.rect.width))x\(Int($0.rect.height))" }.joined(separator: "; "))
+            rugDebug("icons via \(scanner.source): " + icons.prefix(30).map { "\($0.name)@\(Int($0.rect.minX)),\(Int($0.rect.minY)) \(Int($0.rect.width))x\(Int($0.rect.height))" }.joined(separator: "; "))
             lastBumps = bumps
             field.setBumps(bumps)
             wake()
