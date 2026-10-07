@@ -1,0 +1,6 @@
+build/
+dist/
+Resources/gen/
+previews/
+.DS_Store
+*.log
