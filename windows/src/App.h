@@ -32,6 +32,9 @@ public:
 
     void selectRug(const std::wstring& path);
     void openRug(HWND owner);
+    // One of the user's own rugs to the Recycle Bin (only Rug's copy, the original picture stays where it was).
+    void removeRug(const std::wstring& path);
+    bool isUserRug(const std::wstring& path) const;
     void pileIcons(HWND owner);
     void showSettings();
     void showMenu(POINT at);

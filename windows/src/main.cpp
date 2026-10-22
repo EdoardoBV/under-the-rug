@@ -31,6 +31,7 @@ enum {
     CMD_COVER,
     CMD_CENTER,
     CMD_OPEN_RUG,
+    CMD_REMOVE_RUG,
     CMD_RESTORE_WALL,
     CMD_AUTOSTART,
     CMD_QUIT,
@@ -207,6 +208,31 @@ void App::openRug(HWND owner) {
     selectRug(dst);
 }
 
+bool App::isUserRug(const std::wstring& path) const {
+    std::wstring dir = supportDir() + L"\\rugs\\";
+    return _wcsnicmp(path.c_str(), dir.c_str(), dir.size()) == 0;
+}
+
+void App::removeRug(const std::wstring& path) {
+    if (!isUserRug(path) || !fileExists(path)) return;
+    // the rug on the floor goes first, back to the first built-in one
+    if (_wcsicmp(path.c_str(), currentRug().c_str()) == 0) {
+        auto b = builtinRugs();
+        if (!b.empty()) selectRug(b.front());
+        Prefs::remove(L"texture");
+    }
+    ComPtr<IFileOperation> op;
+    ComPtr<IShellItem> item;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&op))) &&
+        SUCCEEDED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item)))) {
+        op->SetOperationFlags(FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOFX_RECYCLEONDELETE);
+        op->DeleteItem(item.Get(), nullptr);
+        op->PerformOperations();
+    }
+    if (fileExists(path)) rugLog(L"couldn't remove a rug");
+    if (settings) settings->refresh();
+}
+
 void App::pileIcons(HWND owner) {
     if (!controller) return;
     modal++;
@@ -250,6 +276,7 @@ void App::showMenu(POINT at) {
         add(rugMenu, CMD_RUG + UINT(i), displayName(rugs[i]), _wcsicmp(rugs[i].c_str(), current.c_str()) == 0);
     AppendMenuW(rugMenu, MF_SEPARATOR, 0, nullptr);
     add(rugMenu, CMD_OPEN_RUG, tr(L"Свой ковер из картинки…", L"Rug from your image…"));
+    if (isUserRug(current)) add(rugMenu, CMD_REMOVE_RUG, tr(L"Убрать этот ковер", L"Remove this rug"));
     AppendMenuW(m, MF_POPUP, (UINT_PTR)rugMenu, tr(L"Ковер", L"Rug"));
 
     std::vector<Screen> screens = allScreens();
@@ -305,6 +332,7 @@ void App::runCommand(UINT cmd, const std::vector<std::wstring>& rugs, const std:
         case CMD_COVER: if (c) c->coverIcons(); break;
         case CMD_CENTER: if (c) c->center(); break;
         case CMD_OPEN_RUG: openRug(nullptr); break;
+        case CMD_REMOVE_RUG: removeRug(currentRug()); break;
         case CMD_RESTORE_WALL: Floors::restore(); break;
         case CMD_AUTOSTART: setAutostart(!autostart()); break;
         case CMD_QUIT: quit(); return;

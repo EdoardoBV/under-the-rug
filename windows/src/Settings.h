@@ -23,6 +23,7 @@ struct Tile {
     std::wstring path;  // empty for the "your image" tile
     std::wstring caption;
     bool selected = false;
+    bool removable = false;  // the user's own pictures get a × on hover
 };
 
 // A wrapping row of picture tiles (rugs, floors).
@@ -32,6 +33,7 @@ public:
     HWND hwnd = nullptr;
     std::vector<Tile> tiles;
     std::function<void(int)> onClick;
+    std::function<void(int)> onRemove;
     float sc = 1;
     HFONT font = nullptr;
     int heightFor(int width) const;
@@ -39,8 +41,12 @@ public:
 private:
     std::map<std::wstring, std::unique_ptr<Gdiplus::Bitmap>>* thumbs;
     const Palette* pal;
+    int hover = -1;
+    bool tracking = false;
     int columns(int width) const;
     RECT tileRect(int i, int width) const;
+    RECT closeRect(int i, int width) const;
+    int tileAt(POINT p) const;
     void paint(HDC dc, int w, int h);
     static LRESULT CALLBACK proc(HWND, UINT, WPARAM, LPARAM);
 };

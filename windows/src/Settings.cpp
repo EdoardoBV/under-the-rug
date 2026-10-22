@@ -144,6 +144,23 @@ RECT TileStrip::tileRect(int i, int width) const {
     return {x, y, x + int(kTileW * sc), y + int((kImgH + kCapGap + kCapH) * sc)};
 }
 
+// The × of a removable tile, in the top right corner of its picture.
+RECT TileStrip::closeRect(int i, int width) const {
+    RECT r = tileRect(i, width);
+    int d = int(20 * sc), m = int(5 * sc);
+    return {r.right - m - d, r.top + m, r.right - m, r.top + m + d};
+}
+
+int TileStrip::tileAt(POINT p) const {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    for (int i = 0; i < (int)tiles.size(); i++) {
+        RECT r = tileRect(i, rc.right);
+        if (PtInRect(&r, p)) return i;
+    }
+    return -1;
+}
+
 int TileStrip::heightFor(int width) const {
     int c = columns(width), rows = std::max(1, (int(tiles.size()) + c - 1) / c);
     return int((2 * kPad + rows * (kImgH + kCapGap + kCapH) + (rows - 1) * kGap) * sc);
@@ -201,6 +218,15 @@ void TileStrip::paint(HDC dc, int w, int h) {
             GraphicsPath edge;
             roundRect(edge, RectF(img.X + lw / 2, img.Y + lw / 2, img.Width - lw, img.Height - lw), rad - lw / 2);
             g.DrawPath(&border, &edge);
+            if (t.removable && i == hover) {
+                RECT c = closeRect(i, w);
+                float d = float(c.right - c.left), x = float(c.left), y = float(c.top), k = d * 0.27f;
+                SolidBrush disc(Color(170, 0, 0, 0));
+                Pen cross(Color(255, 255, 255, 255), 1.6f * sc);
+                g.FillEllipse(&disc, x, y, d, d);
+                g.DrawLine(&cross, x + d / 2 - k, y + d / 2 - k, x + d / 2 + k, y + d / 2 + k);
+                g.DrawLine(&cross, x + d / 2 - k, y + d / 2 + k, x + d / 2 + k, y + d / 2 - k);
+            }
         }
     }
     SetBkMode(dc, TRANSPARENT);
@@ -237,17 +263,51 @@ LRESULT CALLBACK TileStrip::proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         EndPaint(h, &ps);
         return 0;
     }
-    case WM_LBUTTONUP: {
-        RECT rc;
-        GetClientRect(h, &rc);
-        POINT p = {(short)LOWORD(lp), (short)HIWORD(lp)};
-        for (int i = 0; i < (int)self->tiles.size(); i++) {
-            RECT r = self->tileRect(i, rc.right);
-            if (PtInRect(&r, p)) {
-                if (self->onClick) self->onClick(i);
-                break;
-            }
+    case WM_MOUSEMOVE: {
+        int i = self->tileAt({(short)LOWORD(lp), (short)HIWORD(lp)});
+        if (!self->tracking) {
+            TRACKMOUSEEVENT tme = {sizeof(tme), TME_LEAVE, h, 0};
+            self->tracking = TrackMouseEvent(&tme) != FALSE;
         }
+        if (i != self->hover) {
+            self->hover = i;
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        self->tracking = false;
+        self->hover = -1;
+        InvalidateRect(h, nullptr, FALSE);
+        return 0;
+    case WM_LBUTTONUP: {
+        POINT p = {(short)LOWORD(lp), (short)HIWORD(lp)};
+        int i = self->tileAt(p);
+        if (i < 0) return 0;
+        RECT rc, c;
+        GetClientRect(h, &rc);
+        c = self->closeRect(i, rc.right);
+        // the × only counts while it's showing, a click on a bare corner picks the rug
+        bool remove = self->tiles[i].removable && i == self->hover && PtInRect(&c, p);
+        self->hover = -1;
+        if (remove) {
+            if (self->onRemove) self->onRemove(i);
+        } else if (self->onClick) {
+            self->onClick(i);
+        }
+        return 0;
+    }
+    case WM_RBUTTONUP: {
+        POINT p = {(short)LOWORD(lp), (short)HIWORD(lp)};
+        int i = self->tileAt(p);
+        if (i < 0 || !self->tiles[i].removable) return 0;
+        HMENU m = CreatePopupMenu();
+        AppendMenuW(m, MF_STRING, 1, tr(L"Убрать", L"Remove"));
+        ClientToScreen(h, &p);
+        UINT cmd = TrackPopupMenuEx(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, h, nullptr);
+        DestroyMenu(m);
+        self->hover = -1;
+        if (cmd == 1 && self->onRemove) self->onRemove(i);
         return 0;
     }
     }
@@ -297,6 +357,11 @@ void SettingsWindow::create() {
         const Tile& t = rugStrip->tiles[i];
         if (t.path.empty()) app->openRug(hwnd);
         else app->selectRug(t.path);
+    };
+    rugStrip->onRemove = [this](int i) {
+        std::wstring path = rugStrip->tiles[i].path;
+        thumbs.erase(path);
+        app->removeRug(path);
     };
     floorStrip = std::make_unique<TileStrip>(hwnd, ID_FLOORS, &thumbs, &pal);
     floorStrip->onClick = [this](int i) {
@@ -510,10 +575,13 @@ void SettingsWindow::layout() {
 void SettingsWindow::refresh() {
     if (!hwnd) return;
     std::wstring current = app->currentRug();
-    std::vector<std::wstring> rugs = app->builtinRugs(), user = app->userRugs();
-    rugs.insert(rugs.end(), user.begin(), user.end());
     rugStrip->tiles.clear();
-    for (auto& p : rugs) rugStrip->tiles.push_back({p, displayName(p), _wcsicmp(p.c_str(), current.c_str()) == 0});
+    auto addRugs = [&](const std::vector<std::wstring>& list, bool removable) {
+        for (auto& p : list)
+            rugStrip->tiles.push_back({p, displayName(p), _wcsicmp(p.c_str(), current.c_str()) == 0, removable});
+    };
+    addRugs(app->builtinRugs(), false);
+    addRugs(app->userRugs(), true);
     rugStrip->tiles.push_back({L"", tr(L"Своя картинка", L"Your image"), false});
 
     std::wstring floor = Floors::currentName(app->rugScreen());

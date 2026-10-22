@@ -12,7 +12,7 @@
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "user32.lib")
 
-enum { TIMER_HOVER = 1, TIMER_SCAN, TIMER_RESCAN_SOON, TIMER_SCREENS };
+enum { TIMER_HOVER = 1, TIMER_SCAN, TIMER_RESCAN_SOON, TIMER_SCREENS, TIMER_BENCH, TIMER_TRIM };
 enum : UINT { WM_APP_MOVE_SCREEN = WM_APP + 50 };
 
 static void check(HRESULT hr, const char* what) {
@@ -118,6 +118,12 @@ RugController::RugController(HINSTANCE inst, const std::wstring& texturePath, co
     SetTimer(hwnd, TIMER_HOVER, 1000 / 30, nullptr);
     SetTimer(hwnd, TIMER_SCAN, 4000, nullptr);
     SetTimer(hwnd, TIMER_RESCAN_SOON, 300, nullptr);
+    // RUG_BENCH=<seconds>: a scripted fast drag that long after launch (2.5 s for 1 or anything shorter)
+    wchar_t bench[16] = L"";
+    if (GetEnvironmentVariableW(L"RUG_BENCH", bench, 16) > 0) {
+        double delay = std::max(2.5, _wtof(bench));
+        SetTimer(hwnd, TIMER_BENCH, UINT(delay * 1000), nullptr);
+    }
     pacer = std::thread([this] { pacerLoop(); });
     watcher = std::thread([this] { watchLoop(); });
 }
@@ -269,23 +275,62 @@ void RugController::setAwake(bool a) {
         return;
     }
     ResetEvent(awakeEvent);
-    // the last frame stays on screen in the swap chain, the multisampled targets aren't needed until the next move
+    // the multisampled targets go only after a while: freeing and making them again stalls the first frame of a drag
+    SetTimer(hwnd, TIMER_TRIM, 15000, nullptr);
+    rugDebug(L"asleep");
+}
+
+// The rug has been still for a while: the last frame stays on screen in the swap chain,
+// the multisampled targets aren't needed until the next move.
+void RugController::trim() {
     PROCESS_MEMORY_COUNTERS_EX before = {sizeof(before)}, after = {sizeof(after)};
     K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&before, sizeof(before));
     renderer->releaseTargets();
     ComPtr<IDXGIDevice3> d3;
     if (SUCCEEDED(device.As(&d3))) d3->Trim();
+    trimmed = true;
     K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&after, sizeof(after));
-    rugDebug(fmt(L"asleep, private memory %zu -> %zu MB", before.PrivateUsage >> 20, after.PrivateUsage >> 20));
+    rugDebug(fmt(L"trimmed, private memory %zu -> %zu MB", before.PrivateUsage >> 20, after.PrivateUsage >> 20));
+}
+
+// The cursor is on the sleeping rug, a grab may follow: bring the render targets back now with one still frame,
+// so the stall of making them happens while nothing moves.
+void RugController::warmUp() {
+    if (!trimmed) return;
+    trimmed = false;
+    present();
 }
 
 // MARK: frame
 
 void RugController::drawFrame() {
     float dt;
+    double period;
     {
         std::lock_guard<std::mutex> lock(paceMutex);
-        dt = float(framePeriod);
+        period = framePeriod;
+        dt = float(period);
+    }
+    double t0 = nowSeconds();
+    if (stats.frames == 0) stats.start = t0;
+    else {
+        double gap = t0 - stats.last;
+        stats.maxGap = std::max(stats.maxGap, gap);
+        if (gap > period * 1.5) stats.hitches++;
+    }
+    stats.last = t0;
+    stats.frames++;
+
+    if (benchStart > 0) {
+        // a figure eight around the screen centre, fast like a quick mouse drag, timed by the clock
+        double t = t0 - benchStart;
+        float2 p = camera.center() + float2(float(std::sin(t * 4.5)) * 320, float(std::sin(t * 9)) * 140);
+        cloth->grabTarget = camera.unproject(p, cloth->grabTarget.z);
+        if (t > 6) {
+            benchStart = 0;
+            cloth->endGrab();
+            rugLog(L"bench done");
+        }
     }
     // the cursor is followed here too, so dragging keeps going over other windows
     if (dragging) {
@@ -293,32 +338,106 @@ void RugController::drawFrame() {
         else mouseUp();
     }
     bool fieldMoving = field->animate(dt);
-    double t0 = nowSeconds();
     cloth->step(dt);
     cloth->updateDerived(camera);
-    stepTime += nowSeconds() - t0;
-    if (frames++ == 0) statStart = t0;
-    if ((statTime += dt) >= 2) {
-        rugDebug(fmt(L"sim %.2f ms/frame, %.1f fps (screen %.2f Hz), maxSpeed %.1f", stepTime / frames * 1000,
-                     frames / (nowSeconds() - statStart), screen.refresh, cloth->maxSpeed));
-        statTime = stepTime = 0;
-        frames = 0;
+    double t1 = nowSeconds();
+    stats.sim += t1 - t0;
+    if (cloth->isGrabbing()) {
+        stats.lag += cloth->handLag();
+        stats.maxLag = std::max(stats.maxLag, double(cloth->handLag()));
+        stats.lagFrames++;
     }
     present();
+    if (t1 - stats.start >= 1 && rugDebugOn()) logStats(nowSeconds());
 
+    bool settled = cloth->settled(dt);
     if (!cloth->isGrabbing() && !fieldMoving && cloth->maxSpeed < 3) calmTime += dt;
     else calmTime = 0;
-    if (calmTime > 0.75) {
+    if (!fieldMoving && (calmTime > 0.75 || settled)) {
         setAwake(false);
         savePose();
+    }
+}
+
+void RugController::logStats(double now) {
+    collectGpuTimes();
+    double span = now - stats.start;
+    int n = stats.frames;
+    rugLog(fmt(L"%.1f fps on %.0f Hz, %d hitches, worst gap %.1f ms | cpu sim %.2f render %.2f present %.2f (max %.1f) ms "
+               L"| gpu %.2f (max %.2f) ms | maxSpeed %.0f",
+               n / span, screen.refresh, stats.hitches, stats.maxGap * 1000, stats.sim / n * 1000, stats.render / n * 1000,
+               stats.present / n * 1000, stats.maxPresent * 1000, stats.gpuFrames ? stats.gpu / stats.gpuFrames : 0.0,
+               stats.maxGpu, cloth->maxSpeed));
+    if (stats.refreshes)
+        rugLog(fmt(L"  on screen: %u new frames over %u refreshes", stats.presents, stats.refreshes));
+    if (stats.lagFrames)
+        rugLog(fmt(L"  hand behind the cursor: %.0f pt on average, %.0f at most", stats.lag / stats.lagFrames, stats.maxLag));
+    UINT lp = stats.lastPresent, lr = stats.lastRefresh;
+    stats = Stats();
+    stats.lastPresent = lp;
+    stats.lastRefresh = lr;
+}
+
+// GPU time of a frame from timestamp queries, read a few frames later without waiting.
+void RugController::collectGpuTimes() {
+    for (GpuTimer& q : gpuTimers) {
+        if (!q.pending) continue;
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj;
+        if (ctx->GetData(q.disjoint.Get(), &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+        UINT64 a = 0, b = 0;
+        ctx->GetData(q.begin.Get(), &a, sizeof(a), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        ctx->GetData(q.end.Get(), &b, sizeof(b), D3D11_ASYNC_GETDATA_DONOTFLUSH);
+        q.pending = false;
+        if (dj.Disjoint || b < a) continue;
+        double ms = double(b - a) * 1000 / double(dj.Frequency);
+        stats.gpu += ms;
+        stats.maxGpu = std::max(stats.maxGpu, ms);
+        stats.gpuFrames++;
     }
 }
 
 void RugController::present() {
     ComPtr<ID3D11Texture2D> back;
     if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&back)))) return;
+    GpuTimer* timer = nullptr;
+    if (rugDebugOn()) {
+        collectGpuTimes();
+        GpuTimer& q = gpuTimers[gpuNext];
+        if (!q.disjoint) {
+            D3D11_QUERY_DESC dd = {D3D11_QUERY_TIMESTAMP_DISJOINT, 0}, td = {D3D11_QUERY_TIMESTAMP, 0};
+            device->CreateQuery(&dd, &q.disjoint);
+            device->CreateQuery(&td, &q.begin);
+            device->CreateQuery(&td, &q.end);
+        }
+        if (!q.pending && q.disjoint && q.begin && q.end) {
+            timer = &q;
+            gpuNext = (gpuNext + 1) % 4;
+            ctx->Begin(q.disjoint.Get());
+            ctx->End(q.begin.Get());
+        }
+    }
+    double t0 = nowSeconds();
     renderer->render(*cloth, camera, frame.right - frame.left, frame.bottom - frame.top, back.Get(), nullptr);
+    if (timer) {
+        ctx->End(timer->end.Get());
+        ctx->End(timer->disjoint.Get());
+        timer->pending = true;
+    }
+    double t1 = nowSeconds();
     HRESULT hr = swapchain->Present(0, 0);
+    double t2 = nowSeconds();
+    stats.render += t1 - t0;
+    stats.present += t2 - t1;
+    stats.maxPresent = std::max(stats.maxPresent, t2 - t1);
+    DXGI_FRAME_STATISTICS fs;
+    if (rugDebugOn() && SUCCEEDED(swapchain->GetFrameStatistics(&fs))) {
+        if (stats.lastPresent && fs.PresentCount > stats.lastPresent) {
+            stats.presents += fs.PresentCount - stats.lastPresent;
+            stats.refreshes += fs.SyncRefreshCount - stats.lastRefresh;
+        }
+        stats.lastPresent = fs.PresentCount;
+        stats.lastRefresh = fs.SyncRefreshCount;
+    }
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
         rugLog(fmt(L"device lost 0x%08lx", hr));
         setAwake(false);
@@ -391,6 +510,7 @@ void RugController::pollHover() {
     bool busy = (primaryButtonDown() || (GetAsyncKeyState(VK_MBUTTON) & 0x8000)) && ignoresMouse;
     bool hit = !busy && cloth->pick(cursorPoints(), false);
     if (ignoresMouse == hit) setIgnoresMouse(!hit);
+    if (hit && !awake) warmUp();
 }
 
 // Directly above the window that holds the icons: over the icons, under every app window.
@@ -545,6 +665,21 @@ LRESULT RugController::handle(UINT msg, WPARAM wp, LPARAM lp) {
         else if (wp == TIMER_RESCAN_SOON) {
             KillTimer(hwnd, TIMER_RESCAN_SOON);
             rescan();
+        } else if (wp == TIMER_TRIM) {
+            KillTimer(hwnd, TIMER_TRIM);
+            if (!awake) trim();
+        } else if (wp == TIMER_BENCH) {
+            // grab the rug by the middle of its right edge, drawFrame moves the hand
+            KillTimer(hwnd, TIMER_BENCH);
+            warmUp();  // as a real cursor would on its way to the rug
+            cloth->layout(camera.center(), 0, 0);
+            cloth->updateDerived(camera);
+            int v = cloth->idx(cloth->nx - 1, cloth->ny / 2);
+            cloth->beginGrab(v, camera.unproject(cloth->proj[v], cloth->pos[v].z + liftHeight));
+            benchStart = nowSeconds();
+            stats = Stats();
+            rugLog(L"bench start");
+            wake();
         } else if (wp == TIMER_SCREENS) {
             // screens were added, removed or rescaled: stay on ours if it's still there, the primary one otherwise
             KillTimer(hwnd, TIMER_SCREENS);

@@ -84,8 +84,11 @@ std::wstring resourcesDir() {
     std::wstring d = exeDir() + L"\\Resources";
     if (dirExists(d + L"\\rugs")) return d;
     // running straight from windows\build\Rug during development: the repo's own Resources
-    std::wstring dev = exeDir() + L"\\..\\..\\..\\Resources";
-    return dirExists(dev + L"\\rugs") ? dev : d;
+    for (const wchar_t* up : {L"\\..\\..\\..\\Resources", L"\\..\\..\\Resources"}) {
+        std::wstring dev = exeDir() + up;
+        if (dirExists(dev + L"\\rugs")) return dev;
+    }
+    return d;
 }
 
 std::wstring knownFolder(REFKNOWNFOLDERID id) {

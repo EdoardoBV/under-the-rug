@@ -154,6 +154,63 @@ int run(const std::wstring& outDir, const std::wstring& rugPath) {
         sim(hold);
     };
     std::wstring scenario = env(L"RUG_SCENARIO");
+    if (scenario == L"bench") {
+        // the live RUG_BENCH drag: by the middle of the right edge, a fast figure eight for 6 s, then let go
+        cloth.layout(cam.center(), 0, 0);
+        cloth.updateDerived(cam);
+        int v = cloth.idx(cloth.nx - 1, cloth.ny / 2);
+        cloth.beginGrab(v, cam.unproject(cloth.proj[v], cloth.pos[v].z + 120));
+        // RUG_SEED varies the rhythm and phase of the figure eight
+        double seed = env(L"RUG_SEED").empty() ? 0 : _wtof(env(L"RUG_SEED").c_str());
+        double fa = 4.5 * (1 + 0.13 * seed), fb = 9 * (1 - 0.07 * seed), ph = seed * 0.9;
+        int frames = int(fps * 6);
+        double lag = 0, maxLag = 0, t0 = nowSeconds();
+        for (int f = 0; f < frames; f++) {
+            double t = (f + 1) / fps;
+            float2 p = cam.center() + float2(float(std::sin(t * fa + ph)) * 320, float(std::sin(t * fb)) * 140);
+            cloth.grabTarget = cam.unproject(p, cloth.grabTarget.z);
+            field.animate(dt);
+            cloth.step(dt);
+            cloth.updateDerived(cam);
+            lag += cloth.handLag();
+            maxLag = std::max(maxLag, double(cloth.handLag()));
+            if (f == frames / 2) shot("b1-dragging");
+        }
+        printf("dragging: hand %.0f pt behind on average, %.0f at most; sim %.2f ms/frame\n", lag / frames, maxLag,
+               (nowSeconds() - t0) / frames * 1000);
+        cloth.endGrab();
+        shot("b2-released");
+        // when would the rug go to sleep: the old rule (every node under 3 pt/s for 0.75 s) and the new one
+        double oldRule = -1, newRule = -1, calm = 0;
+        std::vector<float3> late = cloth.pos;
+        float maxZ = 0, lateMove = 0;  // height reached 2 s after release, and the biggest half-second move after 5 s
+        for (int f = 1; f <= int(fps * 15); f++) {
+            field.animate(dt);
+            cloth.step(dt);
+            if (f > fps * 2)
+                for (int i = 0; i < cloth.count; i++) maxZ = std::max(maxZ, cloth.pos[i].z);
+            if (f % int(fps / 2) == 0) {
+                if (f > fps * 5)
+                    for (int i = 0; i < cloth.count; i++) lateMove = std::max(lateMove, length(cloth.pos[i] - late[i]));
+                late = cloth.pos;
+            }
+            calm = cloth.maxSpeed < 3 ? calm + dt : 0;
+            if (oldRule < 0 && calm > 0.75) oldRule = f / fps;
+            if (newRule < 0 && cloth.settled(dt)) newRule = f / fps;
+            if (f == int(fps * 3)) {
+                cloth.updateDerived(cam);
+                shot("b3-3s");
+            }
+        }
+        cloth.updateDerived(cam);
+        printf("asleep after release: old rule %s, new rule %.2f s\n",
+               oldRule < 0 ? "never (15 s)" : wideToUtf8(fmt(L"%.2f s", oldRule)).c_str(), newRule);
+        printf("summary: lag %.0f pt, settles %s, highest after 2 s %.0f pt, moves after 5 s up to %.1f pt\n",
+               lag / frames, newRule < 0 ? "never" : wideToUtf8(fmt(L"%.1f s", newRule)).c_str(), maxZ, lateMove);
+        shot("b3-settled");
+        avg();
+        return 0;
+    }
     if (scenario == L"readme") {
         // README clip: the rug drops on a pile of icons, a corner is lifted, mess underneath, the rug goes back
         std::wstring rec = outDir + L"\\frames";

@@ -15,6 +15,8 @@ ClothParams ClothParams::tuned() {
     f("RUG_FS", p.groundStatic);
     f("RUG_FK", p.groundKinetic);
     if (const char* s = std::getenv("RUG_COLS")) p.columns = std::max(3, std::atoi(s));
+    f("RUG_FOLLOW", p.handFollow);
+    if (const char* s = std::getenv("RUG_SPLIT")) p.maxSplit = std::max(1, std::atoi(s));
     return p;
 }
 
@@ -104,6 +106,7 @@ void Cloth::layout(float2 center, float angle, float drop) {
         }
     }
     maxSpeed = 1000;
+    calmRef.clear();
 }
 
 Cloth::Pose Cloth::pose() const {
@@ -177,6 +180,15 @@ void Cloth::step(float frameDt) {
     int n = int(substepDebt + 1e-6);
     substepDebt -= n;
     if (n <= 0) return;
+    // The hand moves at most 0.3 thickness per substep. When the cursor runs away faster than that,
+    // the same time is cut into finer substeps: the hand keeps up and nothing jumps through a layer.
+    float follow = params.handFollow;
+    if (isGrabbing()) {
+        float over = handLag() * std::min(1.f, sdt * follow) / (0.3f * thickness);
+        int split = std::min(params.maxSplit, over > 1 ? int(std::ceil(over)) : 1);
+        sdt /= float(split);
+        n *= split;
+    }
     float maxVel = 0.2f * thickness / sdt;
     float travel = std::min(std::max(maxSpeed * (n * sdt) * 1.5f, thickness), thickness * 4);
     hash->create(pos.data(), count);
@@ -184,7 +196,7 @@ void Cloth::step(float frameDt) {
 
     for (int s = 0; s < n; s++) {
         integrate(sdt, maxVel);
-        moveGrabbed(sdt);
+        moveGrabbed(sdt, follow);
         solveConstraints(sdt);
         solveTethers();
         solveSelfCollisions();
@@ -202,6 +214,28 @@ void Cloth::step(float frameDt) {
         float2 c = prev[count / 2].xy();
         layout(std::isfinite(c.x) && std::isfinite(c.y) ? c : float2(width, height), 0, 60);
     }
+}
+
+bool Cloth::settled(float frameDt) {
+    if (isGrabbing() || calmRef.size() != pos.size()) {
+        calmRef.clear();
+        calmWindows = 0;
+        if (!isGrabbing()) calmRef = pos;
+        calmClock = restClock = 0;
+        return false;
+    }
+    calmClock += frameDt;
+    restClock += frameDt;
+    if (calmClock >= 0.25f) {
+        // half a point per quarter second; after 4 s a slow creep of a fold or a roll doesn't keep it awake either
+        float tol = restClock < 4 ? 0.5f : 2.0f;
+        float m = 0;
+        for (int i = 0; i < count; i++) m = std::max(m, length2(pos[i] - calmRef[i]));
+        calmWindows = m < tol * tol ? calmWindows + 1 : 0;
+        calmRef = pos;
+        calmClock = 0;
+    }
+    return calmWindows >= 3;
 }
 
 void Cloth::solveTethers() {
@@ -233,9 +267,9 @@ void Cloth::integrate(float sdt, float maxVel) {
     }
 }
 
-void Cloth::moveGrabbed(float sdt) {
+void Cloth::moveGrabbed(float sdt, float follow) {
     if (!isGrabbing()) return;
-    float3 d = (grabTarget - grabPos) * std::min(1.f, sdt * 30);
+    float3 d = (grabTarget - grabPos) * std::min(1.f, sdt * follow);
     float maxStep = 0.3f * thickness;
     float l = length(d);
     if (l > maxStep) d *= maxStep / l;

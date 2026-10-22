@@ -60,9 +60,28 @@ private:
     bool ignoresMouse = true;
     bool awake = false;
     double calmTime = 0;
-    double stepTime = 0, statTime = 0, statStart = 0;
-    int frames = 0;
     const float liftHeight = 120;
+
+    // timings for RUG_DEBUG, logged once a second while the rug moves
+    struct Stats {
+        int frames = 0, hitches = 0;
+        double start = 0, last = 0, maxGap = 0;
+        double sim = 0, render = 0, present = 0, maxPresent = 0;
+        double gpu = 0, maxGpu = 0;
+        int gpuFrames = 0;
+        double lag = 0, maxLag = 0;  // grabbed point behind the cursor, points
+        int lagFrames = 0;
+        UINT presents = 0, refreshes = 0;  // from DXGI frame statistics: on-screen frames vs. screen refreshes
+        UINT lastPresent = 0, lastRefresh = 0;
+    } stats;
+    struct GpuTimer {
+        ComPtr<ID3D11Query> disjoint, begin, end;
+        bool pending = false;
+    } gpuTimers[4];
+    int gpuNext = 0;
+    double benchStart = 0;  // RUG_BENCH: a scripted fast drag to measure smoothness
+    void logStats(double now);
+    void collectGpuTimes();
 
     HANDLE awakeEvent = nullptr, stopEvent = nullptr;
     std::atomic<bool> framePending{false};
@@ -80,6 +99,9 @@ private:
     bool savedPose(float2& center, float& angle);
     void wake();
     void setAwake(bool a);
+    bool trimmed = false;  // render targets dropped after a long sleep
+    void trim();
+    void warmUp();
     void drawFrame();
     void present();
 
